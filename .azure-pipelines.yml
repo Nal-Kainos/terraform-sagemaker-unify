@@ -1,0 +1,84 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - '*'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  TF_VERSION: '1.5.0'
+  AWS_REGION: 'us-east-1'
+  AWS_ROLE_ARN: 'arn:aws:iam::184353012435:role/TerraformExecutionRole'
+
+stages:
+- stage: TerraformPlan
+  displayName: 'Terraform Plan'
+  jobs:
+  - job: Plan
+    displayName: 'Run Terraform Plan'
+    steps:
+    - checkout: self
+
+    # ✅ Install AWS CLI, JQ, and Terraform
+    - script: |
+        sudo apt-get update -y
+        sudo apt-get install -y unzip jq
+        curl -fsSL https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip -o terraform.zip
+        unzip terraform.zip
+        sudo mv terraform /usr/local/bin/
+        terraform --version
+      displayName: 'Install Terraform & AWS CLI'
+
+    # ✅ Assume AWS SSO Role to get temporary credentials
+    - script: |
+        echo "Assuming AWS Role: $AWS_ROLE_ARN"
+        CREDS=$(aws sts assume-role --role-arn "$AWS_ROLE_ARN" --role-session-name AzureDevOpsTerraform)
+        export AWS_ACCESS_KEY_ID=$(echo $CREDS | jq -r '.Credentials.AccessKeyId')
+        export AWS_SECRET_ACCESS_KEY=$(echo $CREDS | jq -r '.Credentials.SecretAccessKey')
+        export AWS_SESSION_TOKEN=$(echo $CREDS | jq -r '.Credentials.SessionToken')
+        export AWS_REGION=$(AWS_REGION)
+
+        terraform init
+        terraform validate
+        terraform plan -out=tfplan
+      displayName: 'Terraform Plan'
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Terraform Plan'
+      inputs:
+        pathToPublish: tfplan
+        artifactName: tfplan
+
+- stage: TerraformApply
+  displayName: 'Terraform Apply'
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - job: Apply
+    displayName: 'Apply Terraform Changes'
+    steps:
+    - checkout: self
+
+    - task: DownloadBuildArtifacts@0
+      displayName: 'Download Terraform Plan'
+      inputs:
+        artifactName: tfplan
+        downloadPath: $(Build.SourcesDirectory)
+
+    # ✅ Assume AWS SSO Role Again
+    - script: |
+        echo "Assuming AWS Role: $AWS_ROLE_ARN"
+        CREDS=$(aws sts assume-role --role-arn "$AWS_ROLE_ARN" --role-session-name AzureDevOpsTerraform)
+        export AWS_ACCESS_KEY_ID=$(echo $CREDS | jq -r '.Credentials.AccessKeyId')
+        export AWS_SECRET_ACCESS_KEY=$(echo $CREDS | jq -r '.Credentials.SecretAccessKey')
+        export AWS_SESSION_TOKEN=$(echo $CREDS | jq -r '.Credentials.SessionToken')
+        export AWS_REGION=$(AWS_REGION)
+
+        terraform init
+        terraform apply -auto-approve tfplan
+      displayName: 'Terraform Apply'
