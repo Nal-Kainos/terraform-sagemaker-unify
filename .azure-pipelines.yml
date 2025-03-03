@@ -1,0 +1,62 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - '*'  # Run Terraform Plan on all PRs
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  TF_VERSION: '1.5.0'
+  AWS_REGION: 'us-east-1'
+
+stages:
+- stage: TerraformPlan
+  displayName: 'Terraform Plan'
+  jobs:
+  - job: Plan
+    displayName: 'Run Terraform Plan'
+    steps:
+    - checkout: self
+
+    - task: TerraformInstaller@0
+      displayName: 'Install Terraform'
+      inputs:
+        terraformVersion: $(TF_VERSION)
+
+    - script: |
+        terraform init
+        terraform validate
+        terraform plan -out=tfplan
+      displayName: 'Terraform Plan'
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Terraform Plan'
+      inputs:
+        pathToPublish: tfplan
+        artifactName: tfplan
+
+- stage: TerraformApply
+  displayName: 'Terraform Apply'
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - job: Apply
+    displayName: 'Apply Terraform Changes'
+    steps:
+    - checkout: self
+
+    - task: DownloadBuildArtifacts@0
+      displayName: 'Download Terraform Plan'
+      inputs:
+        artifactName: tfplan
+        downloadPath: $(Build.SourcesDirectory)
+
+    - script: |
+        terraform init
+        terraform apply -auto-approve tfplan
+      displayName: 'Terraform Apply'
